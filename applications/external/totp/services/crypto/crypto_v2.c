@@ -1,13 +1,16 @@
 #include "crypto_v2.h"
+#ifdef TOTP_OBSOLETE_CRYPTO_V2_COMPATIBILITY_ENABLED
 #include <stdlib.h>
 #include <furi.h>
 #include <furi_hal_crypto.h>
 #include <furi_hal_random.h>
 #include <furi_hal_version.h>
 #include "../../types/common.h"
-#include "../hmac/hmac_sha512.h"
+#include "../../config/wolfssl/config.h"
+#include <wolfssl/wolfcrypt/hmac.h>
 #include "memset_s.h"
 #include "constants.h"
+#include "polyfills.h"
 
 #define CRYPTO_ALIGNMENT_FACTOR (16)
 
@@ -46,14 +49,14 @@ uint8_t* totp_crypto_encrypt_v2(
         *encrypted_data_length = plain_data_aligned_length;
 
         furi_check(
-            furi_hal_crypto_store_load_key(crypto_settings->crypto_key_slot, crypto_settings->iv),
-            "Encryption failed: store_load_key");
+            furi_hal_crypto_enclave_load_key(crypto_settings->crypto_key_slot, crypto_settings->iv),
+            "Encryption failed: enclave_load_key");
         furi_check(
             furi_hal_crypto_encrypt(plain_data_aligned, encrypted_data, plain_data_aligned_length),
             "Encryption failed: encrypt");
         furi_check(
-            furi_hal_crypto_store_unload_key(crypto_settings->crypto_key_slot),
-            "Encryption failed: store_unload_key");
+            furi_hal_crypto_enclave_unload_key(crypto_settings->crypto_key_slot),
+            "Encryption failed: enclave_unload_key");
 
         memset_s(plain_data_aligned, plain_data_aligned_length, 0, plain_data_aligned_length);
         free(plain_data_aligned);
@@ -63,13 +66,13 @@ uint8_t* totp_crypto_encrypt_v2(
         *encrypted_data_length = plain_data_length;
 
         furi_check(
-            furi_hal_crypto_store_load_key(crypto_settings->crypto_key_slot, crypto_settings->iv),
+            furi_hal_crypto_enclave_load_key(crypto_settings->crypto_key_slot, crypto_settings->iv),
             "Encryption failed: store_load_key");
         furi_check(
             furi_hal_crypto_encrypt(plain_data, encrypted_data, plain_data_length),
             "Encryption failed: encrypt");
         furi_check(
-            furi_hal_crypto_store_unload_key(crypto_settings->crypto_key_slot),
+            furi_hal_crypto_enclave_unload_key(crypto_settings->crypto_key_slot),
             "Encryption failed: store_unload_key");
     }
 
@@ -85,14 +88,14 @@ uint8_t* totp_crypto_decrypt_v2(
     uint8_t* decrypted_data = malloc(*decrypted_data_length);
     furi_check(decrypted_data != NULL);
     furi_check(
-        furi_hal_crypto_store_load_key(crypto_settings->crypto_key_slot, crypto_settings->iv),
-        "Decryption failed: store_load_key");
+        furi_hal_crypto_enclave_load_key(crypto_settings->crypto_key_slot, crypto_settings->iv),
+        "Decryption failed: enclave_load_key");
     furi_check(
         furi_hal_crypto_decrypt(encrypted_data, decrypted_data, encrypted_data_length),
         "Decryption failed: decrypt");
     furi_check(
-        furi_hal_crypto_store_unload_key(crypto_settings->crypto_key_slot),
-        "Decryption failed: store_unload_key");
+        furi_hal_crypto_enclave_unload_key(crypto_settings->crypto_key_slot),
+        "Decryption failed: enclave_unload_key");
     return decrypted_data;
 }
 
@@ -102,11 +105,9 @@ CryptoSeedIVResult totp_crypto_seed_iv_v2(
     uint8_t pin_length) {
     CryptoSeedIVResult result;
     if(crypto_settings->crypto_verify_data == NULL) {
-        FURI_LOG_I(LOGGING_TAG, "Generating new IV");
-        furi_hal_random_fill_buf(&crypto_settings->base_iv[0], CRYPTO_IV_LENGTH);
+        FURI_LOG_I(LOGGING_TAG, "Generating new salt");
+        furi_hal_random_fill_buf(&crypto_settings->salt[0], CRYPTO_SALT_LENGTH);
     }
-
-    memcpy(&crypto_settings->iv[0], &crypto_settings->base_iv[0], CRYPTO_IV_LENGTH);
 
     const uint8_t* device_uid = get_device_uid();
     uint8_t device_uid_length = get_device_uid_length();
@@ -125,16 +126,20 @@ CryptoSeedIVResult totp_crypto_seed_iv_v2(
         memcpy(hmac_key + device_uid_length, pin, pin_length);
     }
 
-    uint8_t hmac[HMAC_SHA512_RESULT_SIZE] = {0};
-    int hmac_result_code = hmac_sha512(
-        hmac_key, hmac_key_length, &crypto_settings->base_iv[0], CRYPTO_IV_LENGTH, &hmac[0]);
+    uint8_t hmac[WC_SHA512_DIGEST_SIZE] = {0};
+
+    Hmac hmac_context;
+    wc_HmacSetKey(&hmac_context, WC_SHA512, hmac_key, hmac_key_length);
+    wc_HmacUpdate(&hmac_context, &crypto_settings->salt[0], CRYPTO_SALT_LENGTH);
+    int hmac_result_code = wc_HmacFinal(&hmac_context, &hmac[0]);
+    wc_HmacFree(&hmac_context);
 
     memset_s(hmac_key, hmac_key_length, 0, hmac_key_length);
     free(hmac_key);
 
     if(hmac_result_code == 0) {
         uint8_t offset =
-            hmac[HMAC_SHA512_RESULT_SIZE - 1] % (HMAC_SHA512_RESULT_SIZE - CRYPTO_IV_LENGTH - 1);
+            hmac[WC_SHA512_DIGEST_SIZE - 1] % (WC_SHA512_DIGEST_SIZE - CRYPTO_IV_LENGTH - 1);
         memcpy(&crypto_settings->iv[0], &hmac[offset], CRYPTO_IV_LENGTH);
 
         result = CryptoSeedIVResultFlagSuccess;
@@ -182,3 +187,4 @@ bool totp_crypto_verify_key_v2(const CryptoSettings* crypto_settings) {
 
     return key_valid;
 }
+#endif
